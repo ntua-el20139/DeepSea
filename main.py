@@ -128,7 +128,7 @@ with st.sidebar:
         max_value=20,
         value=st.session_state.top_k,
         step=1,
-        help="How many chunks/answers to retrieve from your index."
+        help="The maximum number of chunks/answers to retrieve from your index."
     )
     
     col1, col2, col3 = st.columns([1,4,1])

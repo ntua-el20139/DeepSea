@@ -47,7 +47,7 @@ def _bm25(query: str, size=20, source=None):
         source={"includes": source} if source is not None else {"includes": ["text","title","page","slide","uri","source","caption","extra"]},
     )
 
-def hybrid_search(query: str, k: int = 6, min_score: float = 0.03) -> List[Dict[str, Any]]:
+def hybrid_search(query: str, k: int = 6, min_score: float = 0.01) -> List[Dict[str, Any]]:
     qvec = embed_texts([query])[0]
 
     vres = _knn(qvec, k=20)
