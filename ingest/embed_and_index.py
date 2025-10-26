@@ -8,6 +8,7 @@ from ingest.pipeline import process_file
 from utils.ids import stable_chunk_id
 from ingest.create_index import ensure_index
 from utils.storage import save_chunks
+import glob
 
 
 load_dotenv()
@@ -71,6 +72,9 @@ def upload_files(paths: List[str], max_tokens=800, overlap_tokens=120):
         helpers.bulk(es.options(request_timeout=120), generate_actions(chunks), stats_only=True)
         print(f"[embed_and_index] Done {path} in {time.time() - t0:.2f}s")
 
+
+# Insert all docs into ES index without the help of UI
 if __name__ == "__main__":
     ensure_index()
-    upload_files(["data/raw/Pythia meeting with newcomers_Savings Calculations. (2024-05-02 13_05 GMT+3).mp4",], max_tokens=512, overlap_tokens=120)
+    raw_files = glob.glob("data/raw/*")
+    upload_files(raw_files, max_tokens=512, overlap_tokens=120)

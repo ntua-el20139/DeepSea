@@ -1,4 +1,4 @@
-from typing import Iterator, Tuple, Optional, List, Dict, Any
+from typing import Iterator, Tuple, Optional, List, Dict, Any, TYPE_CHECKING
 from pathlib import Path
 import io
 from PIL import Image
@@ -7,36 +7,43 @@ from pypdf import PdfReader
 from pptx import Presentation
 from docx import Document as Docx
 
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.accelerator_options import AcceleratorOptions
+from docling.datamodel.base_models import ConversionStatus, InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+
 from ingest.docling_ocr import ocr_image
 
 print("[loaders] module loaded")
 
+if TYPE_CHECKING:
+    from docling_core.types.doc.document import DoclingDocument
+
+_DOC_TABLE_CONVERTER: Optional[DocumentConverter] = None
+
 
 def _pptx_table_to_markdown(shape) -> Optional[str]:
     """
-    Return a markdown representation of the table contained in ``shape`` if it
-    has one, otherwise ``None``.
+    Return a markdown representation of the table contained in `shape`
+    using the same restrictions as `_rows_to_markdown`.
     """
     try:
         table = shape.table
     except (AttributeError, ValueError):
         return None
 
-    rows = []
+    # Extract and clean rows
+    rows: List[List[str]] = []
     for row in table.rows:
-        cells = [cell.text.strip() for cell in row.cells]
+        cells = []
+        for cell in row.cells:
+            # Normalize to string, strip, squash newlines (PPTX often has them)
+            txt = (cell.text or "").replace("\r", "\n").replace("\n", " ").strip()
+            cells.append(txt)
         rows.append(cells)
 
-    if not rows:
-        return None
-
-    header = "| " + " | ".join(rows[0]) + " |"
-    if len(rows) == 1:
-        return header
-
-    separator = "| " + " | ".join("---" for _ in rows[0]) + " |"
-    body_lines = ["| " + " | ".join(row) + " |" for row in rows[1:]]
-    return "\n".join([header, separator, *body_lines]) if body_lines else header
+    # Delegate validation/formatting
+    return _rows_to_markdown(rows)
 
 
 def _rows_to_markdown(rows: List[List[str]]) -> Optional[str]:
@@ -44,24 +51,40 @@ def _rows_to_markdown(rows: List[List[str]]) -> Optional[str]:
     Convert a 2D list of strings into a simple GitHub-style markdown table.
     Pads ragged rows to the max column width for consistent formatting.
     """
-    if not rows:
+    if not rows or len(rows) < 2:
         return None
-    # Normalize and ensure all rows have the same length
-    normalized: List[List[str]] = []
-    max_cols = max(len(row) for row in rows)
-    if max_cols == 0:
+    # Clean input: strip whitespace and normalize None → ""
+    cleaned_rows: List[List[str]] = [
+        [("" if cell is None else str(cell)).strip() for cell in row]
+        for row in rows
+    ]
+    header = cleaned_rows[0]
+    data_rows = cleaned_rows[1:]
+    # Header must not be empty or contain empty cells
+    if not header or any(h == "" for h in header):
         return None
-    for row in rows:
-        cleaned = [(cell or "").strip() for cell in row]
-        if len(cleaned) < max_cols:
-            cleaned.extend([""] * (max_cols - len(cleaned)))
-        normalized.append(cleaned)
-    if not any(any(cell for cell in row) for row in normalized):
+    header_len = len(header)
+
+    valid_rows = []
+    for row in data_rows:
+        # Reject if too many columns
+        if len(row) > header_len:
+            return None
+        # Pad if too few
+        if len(row) < header_len:
+            row = row + [""] * (header_len - len(row))
+        valid_rows.append(row)
+
+    # Reject if there's no valid data row
+    if not valid_rows:
         return None
-    header = "| " + " | ".join(normalized[0]) + " |"
-    separator = "| " + " | ".join("---" for _ in range(max_cols)) + " |"
-    body_lines = ["| " + " | ".join(row) + " |" for row in normalized[1:]]
-    return "\n".join([header, separator, *body_lines]) if body_lines else header
+
+    # Build markdown table
+    header_line = "| " + " | ".join(header) + " |"
+    separator = "| " + " | ".join(["---"] * header_len) + " |"
+    body_lines = ["| " + " | ".join(r) + " |" for r in valid_rows]
+
+    return "\n".join([header_line, separator, *body_lines])
 
 
 def _pptx_image(shape) -> Optional[Image.Image]:
@@ -78,20 +101,97 @@ def _pptx_image(shape) -> Optional[Image.Image]:
     except Exception:
         return None
 
-def _docx_table_to_md(tbl) -> str:
-    rows = [[cell.text.strip() for cell in row.cells] for row in tbl.rows]
-    if not rows:
-        return ""
-    head = "| " + " | ".join(rows[0]) + " |"
-    sep = "| " + " | ".join("---" for _ in rows[0]) + " |"
-    body = "\n".join("| " + " | ".join(r) + " |" for r in rows[1:])
-    return "\n".join([head, sep, body]) if len(rows) > 1 else head
+
+def _docx_table_to_md(tbl) -> Optional[str]:
+    """
+    Convert a python-docx table to GitHub-style markdown with the same
+    restrictions as `_rows_to_markdown`.
+    """
+    try:
+        rows: List[List[str]] = []
+        for row in tbl.rows:
+            cells = []
+            for cell in row.cells:
+                txt = (cell.text or "").replace("\r", "\n").replace("\n", " ").strip()
+                cells.append(txt)
+            rows.append(cells)
+    except Exception:
+        return None
+
+    return _rows_to_markdown(rows)
+
 
 def load_pdf_text(path: str) -> Iterator[Tuple[int, str]]:
     print(f"[loaders] load_pdf_text: {path}")
     reader = PdfReader(path)
     for i, page in enumerate(reader.pages):
         yield (i + 1), (page.extract_text() or "")
+
+
+def _get_docling_converter() -> DocumentConverter:
+    global _DOC_TABLE_CONVERTER
+    if _DOC_TABLE_CONVERTER is None:
+        pdf_option = PdfFormatOption(
+            pipeline_options=PdfPipelineOptions(
+                do_ocr=False,
+                accelerator_options=AcceleratorOptions(device="cpu"),
+            )
+        )
+        _DOC_TABLE_CONVERTER = DocumentConverter(
+            allowed_formats=[InputFormat.PDF],
+            format_options={InputFormat.PDF: pdf_option},
+        )
+    return _DOC_TABLE_CONVERTER
+
+
+def _clean_docling_cell_text(cell: Any, doc: "DoclingDocument") -> str:
+    try:
+        text = cell._get_text(doc=doc)
+    except Exception:
+        text = getattr(cell, "text", "")
+    text = "" if text is None else str(text)
+    text = text.replace("\r", " ").replace("\n", " ")
+    return " ".join(text.split())
+
+
+def _docling_table_to_rows(table: Any, doc: "DoclingDocument") -> Optional[List[List[str]]]:
+    data = getattr(table, "data", None)
+    grid = getattr(data, "grid", None) if data is not None else None
+    if not grid:
+        return None
+
+    header_rows: List[List[str]] = []
+    data_rows: List[List[str]] = []
+
+    for row in grid:
+        cleaned_row = [_clean_docling_cell_text(cell, doc) for cell in row]
+        if not any(cleaned_row):
+            continue
+        row_is_header = any(getattr(cell, "column_header", False) for cell in row)
+        if row_is_header and not data_rows:
+            header_rows.append(cleaned_row)
+        else:
+            data_rows.append(cleaned_row)
+
+    if not header_rows and not data_rows:
+        return None
+
+    if header_rows:
+        num_cols = len(header_rows[0])
+        header = []
+        for col_idx in range(num_cols):
+            parts = [row[col_idx] for row in header_rows if row[col_idx]]
+            header.append(" ".join(parts).strip())
+    else:
+        header = data_rows[0]
+        data_rows = data_rows[1:]
+
+    if not data_rows:
+        return None
+
+    header = [col if col else f"Column {idx + 1}" for idx, col in enumerate(header)]
+
+    return [header, *data_rows]
 
 
 def load_pdf_tables(path: str) -> Dict[int, List[str]]:
@@ -101,25 +201,41 @@ def load_pdf_tables(path: str) -> Dict[int, List[str]]:
     print(f"[loaders] load_pdf_tables: {path}")
     tables_by_page: Dict[int, List[str]] = {}
     try:
-        with pdfplumber.open(path) as pdf:
-            for i, page in enumerate(pdf.pages):
-                md_tables: List[str] = []
-                try:
-                    tables = page.extract_tables() or []
-                except Exception:
-                    tables = []
-                for tbl in tables:
-                    if not tbl:
-                        continue
-                    # Ensure rows are consistent lists
-                    rows = [list(row) for row in tbl if row]
-                    md = _rows_to_markdown(rows) # type: ignore
-                    if md:
-                        md_tables.append(md)
-                if md_tables:
-                    tables_by_page[i + 1] = md_tables
+        converter = _get_docling_converter()
+        conv_res = converter.convert(path)
     except Exception as e:
-        print(f"[loaders] pdf table extraction failed ({e}); skipping")
+        print(f"[loaders] docling table extraction failed ({e}); skipping")
+        return tables_by_page
+
+    if conv_res.status not in {ConversionStatus.SUCCESS, ConversionStatus.PARTIAL_SUCCESS}:
+        print(
+            f"[loaders] docling conversion status {conv_res.status}; skipping tables"
+        )
+        return tables_by_page
+
+    doc = conv_res.document
+    for table in getattr(doc, "tables", []):
+        try:
+            rows = _docling_table_to_rows(table, doc)
+        except Exception as table_err:
+            print(f"[loaders] table parsing failed ({table_err}); continuing")
+            continue
+        if not rows:
+            continue
+        md = _rows_to_markdown(rows)
+        if not md:
+            continue
+        page_numbers = sorted(
+            {
+                prov.page_no
+                for prov in getattr(table, "prov", [])
+                if getattr(prov, "page_no", None) is not None
+            }
+        )
+        if not page_numbers:
+            continue
+        for page_no in page_numbers:
+            tables_by_page.setdefault(page_no, []).append(md)
     return tables_by_page
 
 def _ocr_text_and_confidence(image: Image.Image) -> Tuple[str, Optional[float]]:
@@ -233,7 +349,7 @@ def load_docx_blocks(path: str) -> Iterator[Dict[str, Any]]:
 
     for t in d.tables:
         md = _docx_table_to_md(t)
-        if md.strip():
+        if md:
             yield {"type": "table", "as_markdown": md}
 
     for shp in d.inline_shapes:
