@@ -17,6 +17,10 @@ DeepSea is a retrieval-augmented question answering (RAG) system tailored for th
 | Ingestion | File loaders, OCR, ASR, chunking, indexing | `ingest/` package, `utils/` helpers |
 | Storage | Elasticsearch index + on-disk chunk snapshots | external ES cluster, `data/chunks/` |
 
+The architecture of the system can be further explored in the diagram below:
+
+![Architecture Diagram](assets/image.png)
+
 ## Prerequisites
 
 - Python 3.10
