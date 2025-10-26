@@ -1,0 +1,17 @@
+services:
+  app:
+    build:
+      context: .
+    env_file:
+      - .env
+    environment:
+      # Override at runtime if you want the model cached outside the container
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-auto}
+      WHISPER_COMPUTE: ${WHISPER_COMPUTE:-auto}
+    volumes:
+      - ./data:/app/data
+      - ./nltk_data:/app/nltk_data
+    ports:
+      - "8501:8501"
+    restart: unless-stopped

@@ -1,0 +1,17 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+build/
+dist/
+*.egg-info/
+*.log
+.DS_Store
+data/chunks/
+data/raw/
+notes.txt
